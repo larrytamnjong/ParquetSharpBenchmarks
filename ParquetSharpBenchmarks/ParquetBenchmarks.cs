@@ -1,5 +1,6 @@
 ﻿using ParquetSharp;
 using ParquetSharp.Arrow;
+using ParquetSharp.RowOriented;
 
 public class ParquetBenchmarks
 {
@@ -233,11 +234,7 @@ public class ParquetBenchmarks
         Apache.Arrow.RecordBatch batch;
         while ((batch = await batchReader.ReadNextRecordBatchAsync()) != null)
         {
-            using (batch)
-            {
-                for (int i = 0; i < batch.ColumnCount; i++)
-                    GC.KeepAlive(batch.Column(i));
-            }
+
         }
     }
 
@@ -247,68 +244,19 @@ public class ParquetBenchmarks
 
     public void RowOriented_Default()
     {
-        using var file = new ParquetFileReader(FilePath);
-        var enumerator = new ParquetRowEnumerator(file);
+        using var rowReader =
+            ParquetFile.CreateRowReader<(DateTime Timestamp, int ObjectId, float Value)>(FilePath);
 
-        foreach (var row in enumerator)
-            GC.KeepAlive(row);
+        for (int rg = 0; rg < rowReader.FileMetaData.NumRowGroups; ++rg)
+        {
+            var rows = rowReader.ReadRows(rg);
+
+            foreach (var row in rows)
+            {
+                GC.KeepAlive(row);
+            }
+        }
     }
 
     #endregion
-
-
-    public readonly struct ParquetRow
-    {
-        public ParquetRow(DateTime timestamp, int objectId, float value)
-        {
-            Timestamp = timestamp;
-            ObjectId = objectId;
-            Value = value;
-        }
-
-        public DateTime Timestamp { get; }
-        public int ObjectId { get; }
-        public float Value { get; }
-    }
-
-    public sealed class ParquetRowEnumerator : IEnumerable<ParquetRow>
-    {
-        private readonly ParquetFileReader _reader;
-
-        public ParquetRowEnumerator(ParquetFileReader reader)
-        {
-            _reader = reader;
-        }
-
-        public IEnumerator<ParquetRow> GetEnumerator()
-        {
-            for (int rg = 0; rg < _reader.FileMetaData.NumRowGroups; rg++)
-            {
-                using var rowGroup = _reader.RowGroup(rg);
-                int numRows = (int)rowGroup.MetaData.NumRows;
-
-                var timestamps = rowGroup.Column(0)
-                    .LogicalReader<DateTime>()
-                    .ReadAll(numRows);
-
-                var objectIds = rowGroup.Column(1)
-                    .LogicalReader<int>()
-                    .ReadAll(numRows);
-
-                var values = rowGroup.Column(2)
-                    .LogicalReader<float>()
-                    .ReadAll(numRows);
-
-                for (int i = 0; i < numRows; i++)
-                {
-                    yield return new ParquetRow(
-                        timestamps[i],
-                        objectIds[i],
-                        values[i]);
-                }
-            }
-        }
-
-        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
-    }
 }
