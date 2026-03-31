@@ -1,4 +1,5 @@
-﻿using ParquetSharp.Arrow;
+﻿using ParquetSharp;
+using ParquetSharp.Arrow;
 using ParquetSharp.RowOriented;
 
 namespace ParquetSharp.Config.Benchmarks
@@ -207,6 +208,79 @@ namespace ParquetSharp.Config.Benchmarks
                     GC.KeepAlive(row);
                 }
             }
+        }
+
+        #endregion
+
+        #region Generate
+
+        private const int WriteRowsPerGroup = 1_000_000;
+
+        public static void ConvertData(string binPath, Encoding encoding, bool dictionaryEnabled, Compression compression)
+        {
+            string baseName = Path.GetFileNameWithoutExtension(binPath);
+            string encodingTag = (encoding, dictionaryEnabled) switch
+            {
+                (Encoding.Plain, false) => "Plain_NoDic",
+                (Encoding.Plain, true) => "Plain_Dic",
+                (Encoding.ByteStreamSplit, false) => "ByteStreamSplit_NoDic",
+                _ => encoding.ToString()
+            };
+            string compressionTag = compression switch
+            {
+                Compression.Uncompressed => "None",
+                Compression.Snappy => "Snappy",
+                Compression.Zstd => "Zstd",
+                _ => compression.ToString()
+            };
+            string outputFile = $"{baseName}_{encodingTag}_{compressionTag}.parquet";
+
+            byte[] rawBytes = File.ReadAllBytes(binPath);
+            int floatCount = rawBytes.Length / sizeof(float);
+            float[] values = new float[floatCount];
+            Buffer.BlockCopy(rawBytes, 0, values, 0, floatCount * sizeof(float));
+
+            Console.WriteLine($"Read {values.Length:N0} floats from {binPath}");
+
+            var columns = new Column[]
+            {
+                new Column<int>("RowIndex"),
+                new Column<float>("Value"),
+            };
+
+            var builder = new WriterPropertiesBuilder()
+                .Compression(compression)
+                .Encoding(encoding);
+
+            if (!dictionaryEnabled)
+                builder.DisableDictionary();
+
+            using var writer = new ParquetFileWriter(outputFile, columns, builder.Build());
+
+            int offset = 0;
+            while (offset < values.Length)
+            {
+                int batchSize = Math.Min(WriteRowsPerGroup, values.Length - offset);
+
+                var indices = new int[batchSize];
+                var chunk = new float[batchSize];
+                for (int i = 0; i < batchSize; i++)
+                {
+                    indices[i] = offset + i;
+                    chunk[i] = values[offset + i];
+                }
+
+                using var rowGroup = writer.AppendRowGroup();
+                rowGroup.NextColumn().LogicalWriter<int>().WriteBatch(indices);
+                rowGroup.NextColumn().LogicalWriter<float>().WriteBatch(chunk);
+
+                offset += batchSize;
+            }
+
+            writer.Close();
+
+            long fileSize = new FileInfo(outputFile).Length;
+            Console.WriteLine($"Written: {outputFile} ({fileSize / (1024.0 * 1024.0):F2} MB)");
         }
 
         #endregion
